@@ -19,7 +19,9 @@ find_package(catkin REQUIRED COMPONENTS
   tf
   vision_msgs
   visualization_msgs
+  dynamic_reconfigure
 )
+
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
@@ -100,6 +102,10 @@ catkin_python_setup()
 #   cfg/DynReconf1.cfg
 #   cfg/DynReconf2.cfg
 # )
+
+generate_dynamic_reconfigure_options(
+    config/Dope.cfg
+)
 
 ###################################
 ## catkin specific configuration ##

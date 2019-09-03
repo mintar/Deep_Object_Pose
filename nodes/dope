@@ -25,9 +25,12 @@ from dope.inference.cuboid_pnp_solver import CuboidPNPSolver
 from dope.inference.detector import ModelData, ObjectDetector
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import CameraInfo, Image as ImageSensor_msg
-from std_msgs.msg import String
+from std_msgs.msg import String, Empty
 from vision_msgs.msg import Detection3D, Detection3DArray, ObjectHypothesisWithPose
 from visualization_msgs.msg import Marker, MarkerArray
+from dynamic_reconfigure.server import Server
+from dope.cfg import DopeConfig
+
 
 
 class Draw(object):
@@ -120,6 +123,13 @@ class DopeNode(object):
         self.config_detect.sigma = rospy.get_param('~sigma', 3)
         self.config_detect.thresh_points = rospy.get_param("~thresh_points", 0.1)
 
+        self.config_detect.wait_for_trigger = False
+        self.config_detect.has_been_triggered = False
+        self.dynconfig_server = Server(DopeConfig, self.dynconfig_callback)
+
+        # Subscribe to trigger messages
+        self.sub_trigger = rospy.Subscriber("~trigger", Empty, self.trigger_callback)
+
         # For each object to detect, load network model, create PNP solver, and start ROS publishers
         for model, weights_url in rospy.get_param('~weights').iteritems():
             self.models[model] = \
@@ -202,8 +212,24 @@ class DopeNode(object):
         print("Running DOPE...  (Listening to camera topic: '{}')".format(rospy.get_param('~topic_camera')))
         print("Ctrl-C to stop")
 
+
+    def dynconfig_callback(self, config, level):
+        """Dynamic reconfigure callback"""
+        rospy.loginfo("dynamic_reconfigure: wait_for_trigger: " + str(config.wait_for_trigger))
+        self.config_detect.wait_for_trigger = config.wait_for_trigger
+        return config
+
+    def trigger_callback(self, empty):
+        rospy.loginfo("got triggered!")
+        self.config_detect.has_been_triggered = True
+
     def image_callback(self, image_msg, camera_info):
         """Image callback"""
+        if self.config_detect.wait_for_trigger:
+            if not self.config_detect.has_been_triggered:
+                return
+        self.config_detect.has_been_triggered = False
+
 
         img = self.cv_bridge.imgmsg_to_cv2(image_msg, "rgb8")
         # cv2.imwrite('img.png', cv2.cvtColor(img, cv2.COLOR_BGR2RGB))  # for debugging

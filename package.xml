@@ -61,6 +61,7 @@
   <depend>tf</depend>
   <depend>vision_msgs</depend>
   <depend>visualization_msgs</depend>
+  <depend>dynamic_reconfigure</depend>
 
 
   <!-- The export tag contains other, unspecified, tags -->
