@@ -206,8 +206,17 @@ class DopeNode(object):
             rospy.get_param('~topic_camera_info'),
             CameraInfo
         )
-        ts = message_filters.TimeSynchronizer([image_sub, info_sub], 1)
-        ts.registerCallback(self.image_callback)
+        try:
+            depth_sub = message_filters.Subscriber(
+                rospy.get_param('~topic_depth'),
+                ImageSensor_msg
+            )
+            ts = message_filters.TimeSynchronizer([image_sub, info_sub, depth_sub], 1)
+            ts.registerCallback(self.image_callback)
+        except KeyError:
+            # parameter topic_depth is not set, so we'll run without depth image based post processing
+            ts = message_filters.TimeSynchronizer([image_sub, info_sub], 1)
+            ts.registerCallback(self.image_callback)
 
         print("Running DOPE...  (Listening to camera topic: '{}')".format(rospy.get_param('~topic_camera')))
         print("Ctrl-C to stop")
@@ -223,7 +232,7 @@ class DopeNode(object):
         rospy.loginfo("got triggered!")
         self.config_detect.has_been_triggered = True
 
-    def image_callback(self, image_msg, camera_info):
+    def image_callback(self, image_msg, camera_info, depth_msg=None):
         """Image callback"""
         if self.config_detect.wait_for_trigger:
             if not self.config_detect.has_been_triggered:
@@ -332,6 +341,9 @@ class DopeNode(object):
                 "bgr8"
             )
         )
+
+        if depth_msg:
+            detection_array = self.post_processing(detection_array, depth_msg)
         self.pub_detections.publish(detection_array)
         self.publish_markers(detection_array)
 
@@ -406,6 +418,10 @@ class DopeNode(object):
                 pass
 
         self.pub_markers.publish(markers)
+
+    def post_processing(self, detection_array, depth_msg):
+        # TODO
+        pass
 
 
 def rotate_vector(vector, quaternion):
