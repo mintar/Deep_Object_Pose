@@ -82,3 +82,7 @@ ENV QT_X11_NO_MITSHM 1
 
 COPY requirements.txt ${HOME}
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Meshrender
+RUN apt-get update && apt-get -y --no-install-recommends install python-tk
+RUN pip install --no-cache-dir meshrender==0.0.10
