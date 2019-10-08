@@ -364,18 +364,15 @@ class DopeNode(object):
             )
         )
 
+        self.delete_markers()
+
         if not depth_msg:
             detection_array_filtered = detection_array
-            self.publish_markers(detection_array_filtered)
         else:
+            detection_array_filtered = self.post_processing(detection_array, depth_img, camera_matrix)
             color_unfiltered = ColorRGBA()
             color_unfiltered.r = 1.0
             self.publish_markers(detection_array, color_unfiltered, 'unfiltered_')
-
-            detection_array_filtered = self.post_processing(detection_array, depth_img, camera_matrix)
-            color_filtered = ColorRGBA()
-            color_filtered.g = 1.0
-            self.publish_markers(detection_array_filtered, color_filtered)
 
             # detection_array_hist = self.post_processing(detection_array, depth_img, camera_matrix,
             #                                             use_histogram=True)
@@ -383,23 +380,28 @@ class DopeNode(object):
             # color_hist.b = 1.0
             # self.publish_markers(detection_array_hist, color_hist, 'histogram_')
 
+        self.publish_markers(detection_array_filtered)
         self.pub_detections.publish(detection_array_filtered)
 
-    def publish_markers(self, detection_array, color=None, namespace_prefix=''):
+    def delete_markers(self):
         """
-        Publishes markers
-        :param Detection3DArray detection_array: The detections to visualize
-        :param ColorRGBA color: The color to use for all markers. If 'None', use separate color from config for each
-                                object class.
+        Delete all existing markers
         :return: nothing
         """
-        # Delete all existing markers
         markers = MarkerArray()
         marker = Marker()
         marker.action = Marker.DELETEALL
         markers.markers.append(marker)
         self.pub_markers.publish(markers)
 
+    def publish_markers(self, detection_array, color=None, namespace_prefix=''):
+        """
+        Publish markers
+        :param Detection3DArray detection_array: The detections to visualize
+        :param ColorRGBA color: The color to use for all markers. If 'None' (default), use separate color from config for each
+                                object class.
+        :return: nothing
+        """
         # Object markers
         class_id_to_name = {class_id: name for name, class_id in self.class_ids.iteritems()}
         markers = MarkerArray()
