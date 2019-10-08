@@ -12,25 +12,29 @@ listening to an image topic and publishing poses.
 from __future__ import print_function
 
 import cv2
+# import imageio
 import message_filters
 import numpy as np
 import resource_retriever
 import rospy
 import tf.transformations
+import trimesh
 from PIL import Image
 from PIL import ImageDraw
+from autolab_core import RigidTransform
 from cv_bridge import CvBridge
+from dope.cfg import DopeConfig
 from dope.inference.cuboid import Cuboid3d
 from dope.inference.cuboid_pnp_solver import CuboidPNPSolver
 from dope.inference.detector import ModelData, ObjectDetector
+from dynamic_reconfigure.server import Server
 from geometry_msgs.msg import PoseStamped
+from meshrender import Scene, MaterialProperties, SceneObject, VirtualCamera, SceneViewer
+from perception import CameraIntrinsics, RenderMode
 from sensor_msgs.msg import CameraInfo, Image as ImageSensor_msg
-from std_msgs.msg import String, Empty
+from std_msgs.msg import String, Empty, ColorRGBA
 from vision_msgs.msg import Detection3D, Detection3DArray, ObjectHypothesisWithPose
 from visualization_msgs.msg import Marker, MarkerArray
-from dynamic_reconfigure.server import Server
-from dope.cfg import DopeConfig
-
 
 
 class Draw(object):
@@ -96,6 +100,7 @@ class Draw(object):
 
 class DopeNode(object):
     """ROS node that listens to image topic, runs DOPE, and publishes DOPE results"""
+
     def __init__(self):
         self.pubs = {}
         self.models = {}
@@ -105,12 +110,17 @@ class DopeNode(object):
         self.dimensions = {}
         self.class_ids = {}
         self.model_transforms = {}
+        self.mesh_urls = {}
         self.meshes = {}
         self.mesh_scales = {}
         self.cv_bridge = CvBridge()
 
         self.input_is_rectified = rospy.get_param('~input_is_rectified', True)
         self.downscale_height = rospy.get_param('~downscale_height', 500)
+
+        # post processing
+        self.depth_tolerance = rospy.get_param('~depth_tolerance', 0.30)
+        self.min_valid_points_ratio = rospy.get_param('~min_valid_points_ratio', 0.01)
 
         self.config_detect = lambda: None
         self.config_detect.mask_edges = 1
@@ -146,14 +156,25 @@ class DopeNode(object):
                 self.model_transforms[model] = np.array([0.0, 0.0, 0.0, 1.0], dtype='float64')
 
             try:
-                self.meshes[model] = rospy.get_param('~meshes')[model]
-            except KeyError:
-                pass
-
-            try:
                 self.mesh_scales[model] = rospy.get_param('~mesh_scales')[model]
             except KeyError:
                 self.mesh_scales[model] = 1.0
+
+            try:
+                self.mesh_urls[model] = rospy.get_param('~meshes')[model]
+                mesh_path = resource_retriever.get_filename(self.mesh_urls[model], use_protocol=False)
+                mesh = trimesh.load_mesh(mesh_path)
+
+                if type(mesh) is trimesh.base.Trimesh:
+                    mesh.apply_scale(self.mesh_scales[model])
+                    self.meshes[model] = mesh
+                else:
+                    rospy.logerr('The mesh "{0!s}" was loaded as class {0!s} (expected: {0!s}).'.format(
+                        mesh_path, type(mesh), trimesh.base.Trimesh))
+                    rospy.logerr('This probably means that it consists of multiple geometries; post processing will'
+                                 + ' not work for this class. Try loading an STL file instead.')
+            except KeyError:
+                pass
 
             self.draw_colors[model] = tuple(rospy.get_param("~draw_colors")[model])
             self.dimensions[model] = tuple(rospy.get_param("~dimensions")[model])
@@ -221,14 +242,13 @@ class DopeNode(object):
         print("Running DOPE...  (Listening to camera topic: '{}')".format(rospy.get_param('~topic_camera')))
         print("Ctrl-C to stop")
 
-
-    def dynconfig_callback(self, config, level):
+    def dynconfig_callback(self, config, _):
         """Dynamic reconfigure callback"""
         rospy.loginfo("dynamic_reconfigure: wait_for_trigger: " + str(config.wait_for_trigger))
         self.config_detect.wait_for_trigger = config.wait_for_trigger
         return config
 
-    def trigger_callback(self, empty):
+    def trigger_callback(self, _):
         rospy.loginfo("got triggered!")
         self.config_detect.has_been_triggered = True
 
@@ -239,9 +259,9 @@ class DopeNode(object):
                 return
         self.config_detect.has_been_triggered = False
 
-
         img = self.cv_bridge.imgmsg_to_cv2(image_msg, "rgb8")
-        # cv2.imwrite('img.png', cv2.cvtColor(img, cv2.COLOR_BGR2RGB))  # for debugging
+        if depth_msg:
+            depth_img = self.cv_bridge.imgmsg_to_cv2(depth_msg, "32FC1")
 
         # Update camera matrix and distortion coefficients
         if self.input_is_rectified:
@@ -261,6 +281,8 @@ class DopeNode(object):
         if scaling_factor < 1.0:
             camera_matrix[:2] *= scaling_factor
             img = cv2.resize(img, (int(scaling_factor * width), int(scaling_factor * height)))
+            if depth_msg:
+                depth_img = cv2.resize(depth_img, (int(scaling_factor * width), int(scaling_factor * height)))
 
         for m in self.models:
             self.pnp_solvers[m].set_camera_intrinsic_matrix(camera_matrix)
@@ -342,12 +364,35 @@ class DopeNode(object):
             )
         )
 
-        if depth_msg:
-            detection_array = self.post_processing(detection_array, depth_msg)
-        self.pub_detections.publish(detection_array)
-        self.publish_markers(detection_array)
+        if not depth_msg:
+            detection_array_filtered = detection_array
+            self.publish_markers(detection_array_filtered)
+        else:
+            color_unfiltered = ColorRGBA()
+            color_unfiltered.r = 1.0
+            self.publish_markers(detection_array, color_unfiltered, 'unfiltered_')
 
-    def publish_markers(self, detection_array):
+            detection_array_filtered = self.post_processing(detection_array, depth_img, camera_matrix)
+            color_filtered = ColorRGBA()
+            color_filtered.g = 1.0
+            self.publish_markers(detection_array_filtered, color_filtered)
+
+            # detection_array_hist = self.post_processing(detection_array, depth_img, camera_matrix,
+            #                                             use_histogram=True)
+            # color_hist = ColorRGBA()
+            # color_hist.b = 1.0
+            # self.publish_markers(detection_array_hist, color_hist, 'histogram_')
+
+        self.pub_detections.publish(detection_array_filtered)
+
+    def publish_markers(self, detection_array, color=None, namespace_prefix=''):
+        """
+        Publishes markers
+        :param Detection3DArray detection_array: The detections to visualize
+        :param ColorRGBA color: The color to use for all markers. If 'None', use separate color from config for each
+                                object class.
+        :return: nothing
+        """
         # Delete all existing markers
         markers = MarkerArray()
         marker = Marker()
@@ -360,18 +405,24 @@ class DopeNode(object):
         markers = MarkerArray()
         for i, det in enumerate(detection_array.detections):
             name = class_id_to_name[det.results[0].id]
-            color = self.draw_colors[name]
+            if color:
+                color_rgba = color
+            else:
+                color_rgba = ColorRGBA()
+                draw_color = self.draw_colors[name]
+                color_rgba.r = draw_color[0] / 255.0
+                color_rgba.g = draw_color[1] / 255.0
+                color_rgba.b = draw_color[2] / 255.0
+                color_rgba.a = 1.0
 
             # cube marker
             marker = Marker()
             marker.header = detection_array.header
             marker.action = Marker.ADD
             marker.pose = det.bbox.center
-            marker.color.r = color[0] / 255.0
-            marker.color.g = color[1] / 255.0
-            marker.color.b = color[2] / 255.0
+            marker.color = color_rgba
             marker.color.a = 0.4
-            marker.ns = "bboxes"
+            marker.ns = namespace_prefix + "bboxes"
             marker.id = i
             marker.type = Marker.CUBE
             marker.scale = det.bbox.size
@@ -382,12 +433,10 @@ class DopeNode(object):
             marker.header = detection_array.header
             marker.action = Marker.ADD
             marker.pose = det.bbox.center
-            marker.color.r = color[0] / 255.0
-            marker.color.g = color[1] / 255.0
-            marker.color.b = color[2] / 255.0
+            marker.color = color_rgba
             marker.color.a = 1.0
             marker.id = i
-            marker.ns = "texts"
+            marker.ns = namespace_prefix + "texts"
             marker.type = Marker.TEXT_VIEW_FACING
             marker.scale.x = 0.05
             marker.scale.y = 0.05
@@ -401,17 +450,15 @@ class DopeNode(object):
                 marker.header = detection_array.header
                 marker.action = Marker.ADD
                 marker.pose = det.bbox.center
-                marker.color.r = color[0] / 255.0
-                marker.color.g = color[1] / 255.0
-                marker.color.b = color[2] / 255.0
+                marker.color = color_rgba
                 marker.color.a = 0.7
-                marker.ns = "meshes"
+                marker.ns = namespace_prefix + "meshes"
                 marker.id = i
                 marker.type = Marker.MESH_RESOURCE
                 marker.scale.x = self.mesh_scales[name]
                 marker.scale.y = self.mesh_scales[name]
                 marker.scale.z = self.mesh_scales[name]
-                marker.mesh_resource = self.meshes[name]
+                marker.mesh_resource = self.mesh_urls[name]
                 markers.markers.append(marker)
             except KeyError:
                 # user didn't specify self.meshes[name], so don't publish marker
@@ -419,9 +466,133 @@ class DopeNode(object):
 
         self.pub_markers.publish(markers)
 
-    def post_processing(self, detection_array, depth_msg):
-        # TODO
-        pass
+    def post_processing(self, detection_array, depth_img, camera_matrix, use_histogram=False):
+        rospy.logdebug('\n=========================================================\n')
+
+        # serialize and then deserialize the input array to make sure that
+        # 1. we're not unintentionally changing the input array (a copy.deepcopy would also have worked)
+        # 2. detection_array is completely de-aliased, i.e., no two fields point to the same variable (e.g.
+        #    det.bbox.center and det.results[0].pose), otherwise when modifying one of them we unintentionally
+        #    also modify the other (copy.deepcopy is not sufficient).
+        detection_array = serialize_deserialize(detection_array)
+
+        detection_array_out = Detection3DArray()
+        detection_array_out.header = detection_array.header
+        camera_intrinsics = CameraIntrinsics(
+            frame='camera',
+            fx=camera_matrix[(0, 0)],
+            fy=camera_matrix[(1, 1)],
+            cx=camera_matrix[(0, 2)],
+            cy=camera_matrix[(1, 2)],
+            skew=camera_matrix[(0, 1)],
+            height=depth_img.shape[0],
+            width=depth_img.shape[1]
+        )
+
+        class_id_to_name = {class_id: name for name, class_id in self.class_ids.iteritems()}
+        for i, det in enumerate(detection_array.detections):
+            # TODO: filter out detections where bbox has negative z value
+            name = class_id_to_name[det.results[0].id]
+
+            quaternion_wxyz = np.array([det.bbox.center.orientation.w,
+                                        det.bbox.center.orientation.x,
+                                        det.bbox.center.orientation.y,
+                                        det.bbox.center.orientation.z])
+            translation = np.array([det.bbox.center.position.x,
+                                    det.bbox.center.position.y,
+                                    det.bbox.center.position.z])
+            rotation = RigidTransform.rotation_from_quaternion(quaternion_wxyz)
+            object_pose = RigidTransform(
+                rotation=rotation,
+                translation=translation,
+                from_frame='target_model',
+                to_frame='camera'
+            )
+
+            try:
+                mesh = self.meshes[name]
+            except KeyError:
+                # user didn't specify self.meshes[name], so don't process mesh
+                detection_array_out.detections.append(det)
+                continue
+
+            synthetic_depth_img = render_depth_image(object_pose, camera_intrinsics, mesh)
+            synthetic_depth_img = np.squeeze(synthetic_depth_img.raw_data)
+
+            rospy.logdebug('---------------------------------------------------------')
+
+            # DEPTH_SCALING_FACTOR = 10000.0
+            # UNIT_SCALING = 1.0
+            # imageio.imwrite('/root/catkin_ws/src/dope/{}_depth.png'.format(i),
+            #                 (depth_img * DEPTH_SCALING_FACTOR * UNIT_SCALING).astype(np.uint16))
+            # imageio.imwrite('/root/catkin_ws/src/dope/{:d}_synthetic_depth.png'.format(i),
+            #                 (synthetic_depth_img * DEPTH_SCALING_FACTOR * UNIT_SCALING).astype(np.uint16))
+
+            # depth_img has nans, synthetic_depth_img has 0.0 for invalid depths
+            diffs = depth_img[synthetic_depth_img != 0.0] - synthetic_depth_img[synthetic_depth_img != 0.0]
+            diffs = diffs[np.logical_not(np.isnan(diffs))]
+            diffs = diffs[np.fabs(diffs) < self.depth_tolerance]
+
+            total_pixels = len(synthetic_depth_img[synthetic_depth_img != 0.0])
+            valid_pixels = len(diffs)
+            if total_pixels == 0:
+                continue
+            valid_ratio = float(valid_pixels) / total_pixels
+            if valid_ratio <= self.min_valid_points_ratio:
+                continue
+
+            if use_histogram:
+                histogram, bin_edges = np.histogram(diffs, bins='auto')
+                diff = (bin_edges[histogram.argmax()] + bin_edges[histogram.argmax() + 1]) / 2.0
+            else:
+                diff = diffs.mean()
+
+            rospy.logdebug("id:          {}".format(det.results[0].id))
+            rospy.logdebug("valid_ratio: {} ({}/{})".format(valid_ratio, valid_pixels, total_pixels))
+            rospy.logdebug("diff:        {}".format(diff))
+
+            det.bbox.center.position.z += diff
+            det.results[0].pose.pose.position.z += diff
+            detection_array_out.detections.append(det)
+
+        return detection_array_out
+
+
+def render_depth_image(object_pose, camera_intrinsics, mesh, unit_scaling=1.0, start_viewer=False):
+    """
+    Renders a synthetic depth image of one object in a given pose.
+
+    :param RigidTransform object_pose:
+    :param CameraIntrinsics camera_intrinsics:
+    :param trimesh.Trimesh mesh:
+    :param float unit_scaling: Scale factor for depth values (e.g. 1.0 = m, 100.0 = cm)
+    :param bool start_viewer: Whether to start the graphical scene viewer (for debugging)
+    :return: The rendered depth image.
+    :rtype: perception.DepthImage
+    """
+    scene = Scene()
+
+    # Set up a material property (only used for visualization)
+    blue_material = MaterialProperties(
+        color=np.array([0.1, 0.1, 0.5]),
+        k_a=0.3,
+        k_d=1.0,
+        k_s=1.0,
+        alpha=10.0,
+        smooth=False
+    )
+    scene_obj = SceneObject(mesh=mesh, T_obj_world=object_pose, material=blue_material)
+    scene.add_object('target_model', scene_obj)
+
+    camera_pose = RigidTransform(from_frame='camera', to_frame='world')
+    scene.camera = VirtualCamera(camera_intrinsics, camera_pose, z_near=(0.05 * unit_scaling),
+                                 z_far=(6.5535 * unit_scaling))
+    if start_viewer:
+        SceneViewer(scene, raymond_lighting=True, starting_camera_pose=camera_pose)
+
+    [depth_image] = scene.wrapped_render([RenderMode.DEPTH])
+
+    return depth_image
 
 
 def rotate_vector(vector, quaternion):
@@ -431,6 +602,19 @@ def rotate_vector(vector, quaternion):
     vector = tf.transformations.quaternion_multiply(q_conj, vector)
     vector = tf.transformations.quaternion_multiply(vector, quaternion)
     return vector[:3]
+
+
+def serialize_deserialize(message):
+    """
+    Serialize and then deserialize a message. This makes sure that the message is completely flattened and that there
+    are no values
+    """
+    from StringIO import StringIO
+    buff = StringIO()
+    message.serialize(buff)
+    result = message.__class__()  # create new instance of same class as message
+    result.deserialize(buff.getvalue())
+    return result
 
 
 def main():
