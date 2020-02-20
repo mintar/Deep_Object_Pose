@@ -120,6 +120,7 @@ class DopeNode(object):
 
         # post processing
         self.depth_tolerance = rospy.get_param('~depth_tolerance', 0.30)
+        self.time_tolerance = rospy.get_param('~time_tolerance', 0.2)
         self.min_valid_points_ratio = rospy.get_param('~min_valid_points_ratio', 0.01)
 
         self.config_detect = lambda: None
@@ -232,7 +233,7 @@ class DopeNode(object):
                 rospy.get_param('~topic_depth'),
                 ImageSensor_msg
             )
-            ts = message_filters.TimeSynchronizer([image_sub, info_sub, depth_sub], 1)
+            ts = message_filters.ApproximateTimeSynchronizer([image_sub, info_sub, depth_sub], 3, self.time_tolerance)
             ts.registerCallback(self.image_callback)
         except KeyError:
             # parameter topic_depth is not set, so we'll run without depth image based post processing

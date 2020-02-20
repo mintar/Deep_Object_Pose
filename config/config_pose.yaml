@@ -94,3 +94,5 @@ depth_tolerance: 0.30
 # almost always have 0 valid points, whereas true positives range between 0.02 and 0.70 (depending on object and
 # camera).
 min_valid_points_ratio: 0.01
+# Maximum time (in seconds) between depth and RGB image pair (in case of unsynchronized cameras)
+time_tolerance: 0.2
