@@ -88,8 +88,8 @@ thresh_points: 0.1
 # uncomment topic_depth to enable post processing
 #topic_depth: "/camera/depth/image_rect"
 # maximum depth distance (in meters) between recognized pose and true pose in depth image
-depth_cutoff: 0.30
-# Minimum ratio between valid points (= not NaN, within depth_cutoff) in actual depth image and expected points in
+depth_tolerance: 0.30
+# Minimum ratio between valid points (= not NaN, within depth_tolerance) in actual depth image and expected points in
 # in rendered depth image. Detections below min_valid_points_ratio will be discarded. In practice, false positives
 # almost always have 0 valid points, whereas true positives range between 0.02 and 0.70 (depending on object and
 # camera).
