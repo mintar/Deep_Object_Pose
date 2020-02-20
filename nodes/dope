@@ -21,7 +21,7 @@ import tf.transformations
 import trimesh
 from PIL import Image
 from PIL import ImageDraw
-from autolab_core import RigidTransform
+from autolab_core import RigidTransform, Point
 from cv_bridge import CvBridge
 from dope.cfg import DopeConfig
 from dope.inference.cuboid import Cuboid3d
@@ -554,8 +554,22 @@ class DopeNode(object):
             rospy.logdebug("valid_ratio: {} ({}/{})".format(valid_ratio, valid_pixels, total_pixels))
             rospy.logdebug("diff:        {}".format(diff))
 
-            det.bbox.center.position.z += diff
-            det.results[0].pose.pose.position.z += diff
+            # shift object along camera view direction
+            original_point_3d = Point(np.array([det.bbox.center.position.x,
+                                                det.bbox.center.position.y,
+                                                det.bbox.center.position.z]),
+                                      'camera')
+            # TODO: round_px=False doesn't do anything useful because project() returns astype(np.int16)
+            original_point_2d = camera_intrinsics.project(original_point_3d, round_px=False)
+            shifted_point_3d = camera_intrinsics.deproject_pixel(det.bbox.center.position.z + diff,
+                                                                 Point(np.array([original_point_2d.x,
+                                                                                 original_point_2d.y]),
+                                                                       'camera'))
+            det.bbox.center.position.x = shifted_point_3d.x
+            det.bbox.center.position.y = shifted_point_3d.y
+            det.bbox.center.position.z = shifted_point_3d.z
+            # TODO: check that det.results[0].pose.pose.position == det.bbox.center.position before overwriting
+            det.results[0].pose.pose.position = det.bbox.center.position
             detection_array_out.detections.append(det)
 
         return detection_array_out
